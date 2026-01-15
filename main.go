@@ -3,9 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"embed"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -14,35 +18,92 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
+//go:embed web/index.html
+var content embed.FS
+
+// 全局变量，用于临时接收前端传来的 URL
+var targetUrl string
+
 func main() {
-	fmt.Println("==============================")
-	fmt.Println("   公众号文章抓取小助手 Ver 1.0   ")
-	fmt.Println("==============================")
-	fmt.Println("[1] 🕷️  爬取目录页链接 (Spider)")
-	fmt.Println("[2] 📥  批量下载文章 (Downloader)")
-	fmt.Println("==============================")
-	fmt.Print("👉 请输入数字 (1 或 2) 然后回车: ")
+	// 1. 设置 Web 路由
+	http.HandleFunc("/", handleIndex)
+	http.HandleFunc("/api/start", handleStart)
 
-	var choice int
-	_, err := fmt.Scanln(&choice)
+	// 2. 启动浏览器 (核心体验优化)
+	// 使用 goroutine 稍微延迟一点，确保服务器先启动
+	go func() {
+		time.Sleep(500 * time.Millisecond) // 等 0.5 秒
+		openBrowser("http://localhost:12345")
+	}()
+
+	fmt.Println("=======================================")
+	fmt.Println("   公众号下载器 Web版已启动   ")
+	fmt.Println("   请在浏览器访问: http://localhost:12345   ")
+	fmt.Println("=======================================")
+
+	// 3. 启动 HTTP 服务 (阻塞运行)
+	// 监听 0.0.0.0 允许局域网访问，但在朋友电脑上通常就是 localhost
+	err := http.ListenAndServe(":12345", nil)
 	if err != nil {
-		fmt.Println("❌ 输入错误，请输入数字 1 或 2")
-		return
-	}
-
-	switch choice {
-	case 1:
-		runSpider()
-	case 2:
-		runDownloader()
-	default:
-		fmt.Println()
+		log.Fatal("服务器启动失败: ", err)
 	}
 }
 
-// ==========================================
-// 功能 1: 爬虫 (原第一个被注释的 main)
-// ==========================================
+// 首页：直接返回内嵌的 HTML
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	page, _ := content.ReadFile("web/index.html")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(page)
+}
+
+// API：接收前端的开始指令
+// API：接收前端的开始指令 (SSE 模式)
+func handleStart(w http.ResponseWriter, r *http.Request) {
+	url := r.URL.Query().Get("url")
+	if url == "" {
+		http.Error(w, "URL cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	// 1. 设置 SSE 必要的 HTTP 头
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// 2. 立即发送一个连接成功的信号
+	SSELog(w, "🚀 后台服务已连接，准备开始任务...")
+
+	// 3. 调用业务逻辑 (Processor)
+	// 注意：这里是同步调用，直到 ProcessTask 跑完，这个 HTTP 请求才会结束
+	// 所有的日志都会通过 w 实时推送到前端
+	ProcessTask(w, url)
+}
+
+// -------------------------------------------------
+// 辅助工具：自动打开浏览器 (兼容 Mac 和 Windows)
+// -------------------------------------------------
+
+func openBrowser(url string) {
+	var err error
+
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("xdg-open", url).Start()
+	case "windows":
+		// Windows 下使用 cmd /c start
+		err = exec.Command("cmd", "/c", "start", url).Start()
+	case "darwin":
+		// Mac 下使用 open
+		err = exec.Command("open", url).Start()
+	default:
+		err = fmt.Errorf("unsupported platform")
+	}
+
+	if err != nil {
+		log.Printf("尝试自动打开浏览器失败 (请手动访问 %s): %v\n", url, err)
+	}
+}
 
 func runSpider() {
 	// 🔗 这里填那个包含很多链接的“目录页” URL
@@ -223,9 +284,14 @@ func readLines(path string) ([]string, error) {
 }
 
 // 辅助函数：清理文件名
-func sanitizeFilename(name string) string {
-	name = strings.ReplaceAll(name, "/", "-")
-	name = strings.ReplaceAll(name, "\\", "-")
-	name = strings.ReplaceAll(name, ":", "-")
-	return name
-}
+//func sanitizeFilename(name string) string {
+//	// Windows 非法字符：< > : " / \ | ? *
+//	invalidChars := []string{"<", ">", ":", "\"", "/", "\\", "|", "?", "*"}
+//	for _, char := range invalidChars {
+//		name = strings.ReplaceAll(name, char, "-")
+//	}
+//	// 移除换行符等控制字符
+//	name = strings.ReplaceAll(name, "\n", "")
+//	name = strings.ReplaceAll(name, "\r", "")
+//	return strings.TrimSpace(name)
+//}
